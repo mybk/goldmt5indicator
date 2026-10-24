@@ -93,9 +93,6 @@
 //|        - ATR tamponu her tickte tum seriyi degil, yalniz yeni        |
 //|          barlari kopyalar. Aktif bolge listesi: biten bolgeler       |
 //|          her tickte taranmaz. ArrayResize rezervli.                 |
-//|  V1.22: Bolge siniri her zaman 2.mum (FVG mumu) uclarina gore:     |
-//|        Talep: ust = 1.mum high, alt = 2.mum low (her zaman).      |
-//|        Arz:   alt = 1.mum low,  ust = 2.mum high (her zaman).     |
 //|  V1.21: TP/SL seviyeleri 3'ten 8'e cikarildi (TP4..TP8 / SL4..SL8, |
 //|        mantik TP3/SL3 ile birebir ayni: TPn = n x bolge yuksekligi,|
 //|        odul nR / risk 1R). Yazida tp1-tp3 / sl1-sl3 eskisi gibi;   |
@@ -104,6 +101,11 @@
 //|        Tablo 8 seviyeye cikti ve Net R'dan sonra Ort R kolonu      |
 //|        eklendi (Ort R = Net R / sonuclanan islem sayisi (TP+SL)).  |
 //|        CSV: TP1..TP8 kolonlari.                                    |
+//|  V1.22: Yeni aralik filtresi 'Ilk N Mum ATR': FVG'yi dogrulayan     |
+//|        mum (3.mum) DAHIL N mumda (vars. N=3, FirstNCandles ile      |
+//|        4-5 vb. yapilabilir) ilk temastan once bolgeden ulasilan    |
+//|        en uzak hareket, ATR cinsinden (talep: yukari, arz: asagi).  |
+//|        Panelde min-max olarak girilir. CSV'ye son kolon eklendi.    |
 //+------------------------------------------------------------------+
 #property copyright "Claude"
 #property indicator_chart_window
@@ -136,6 +138,7 @@ input int     SwingLookback      = 100;                     // V/UV: swing arama
 input string  CsvSeparator       = ";";                     // CSV ayiraci (Excel TR icin ; , diger icin ,)
 input int     ORJLookback        = 60;                      // ORJ/NORJ: onceki ayni yonlu bolge icin geriye kac mum taransin
 input int     MaxZoneAgeBars     = 60;                      // Bolgenin azami yasi (mum). Sonra saga uzamaz (0 = sinirsiz)
+input int     FirstNCandles      = 3;                       // Ilk N Mum ATR filtresi: FVG mumu (3.mum) dahil kac mum (3 / 4 / 5 ...)
 
 #define NLEV 8          // TP/SL seviye sayisi (1 e N odul: TPn = n x bolge yuksekligi)
 #define NLEV_MAIN 3     // ana yazida gosterilen seviye sayisi (kalanlar 2. yaziya)
@@ -175,6 +178,7 @@ struct SDZoneInfo
    bool     dirty;        // nesneleri yeniden cizilmeli mi
    double   atr;          // 3. mum barindaki ATR degeri
    double   ext;          // ilk temasa kadar ulasilan uc fiyat (talep: en yuksek high, arz: en dusuk low)
+   double   extN;         // V1.22: ayni sey ama yalnizca FVG mumu dahil ilk N mum icinde
    int      touchIdx;     // ilk temas edilen bar (-1: henuz yok)
    int      outLast;      // sonuc takibinde en son islenen (kapanmis) bar
    bool     trackDone;    // takip bitti (3 seviye de sonuclandi ya da temas hic olmadi)
@@ -197,6 +201,7 @@ int lastScanned = -1;   // yeni bolge taramasinda en son islenen bar (tekrar tar
 
 //--- V1.20 performans durum degiskenleri
 int    atrBase     = 0;        // atrBuf[0] hangi bar index'ine ait
+int    gWinN       = 3;        // V1.22: Ilk N Mum ATR filtresindeki N (OnInit'te FirstNCandles'tan)
 int    activeZones[];          // hala islem gerektiren bolgelerin zones[] index'leri
 int    gTotal      = 0;        // son OnCalculate'teki rates_total
 bool   syncValid   = false;    // nesne senkron penceresi gecerli mi
@@ -610,9 +615,9 @@ void SetCell(string name,int x,int y,string text,color clr)
 #define TBL_W     240   // tablo / panel genisligi (piksel)
 #define TBL_ROWH  18    // istatistik tablosu satir yuksekligi
 #define TBL_H     (TBL_ROWH*(NLEV+2)+10)   // tablo yuksekligi: baslik + NLEV seviye + bilgi satiri
-#define FLT_N     7     // aralik (min-max) filtresi sayisi
+#define FLT_N     8     // aralik (min-max) filtresi sayisi
 
-string fltName[FLT_N] = {"Genislik ATR","Uzaklasma ATR","BO","YP","BU","BD","BY"};
+string fltName[FLT_N] = {"Genislik ATR","Uzaklasma ATR","BO","YP","BU","BD","BY","Ilk 3 Mum ATR"};   // son ad OnInit'te N'e gore guncellenir
 bool   fltOn[FLT_N];       // filtre acik mi
 bool   fltHasMin[FLT_N];   // alt sinir girildi mi (bos = sinirsiz)
 bool   fltHasMax[FLT_N];   // ust sinir girildi mi
@@ -711,6 +716,13 @@ bool FltValue(const SDZoneInfo &z,int i,double &v)
             return(false);
          v = (double)(z.touchIdx-z.fvgIdx);
          break;
+      case 7:
+        {
+         // V1.22: FVG mumu dahil ilk N mumda bolgeden uzaklasma (ATR cinsinden, mutlak)
+         double moveN = z.isDemand ? MathMax(0.0,z.extN-z.top) : MathMax(0.0,z.bottom-z.extN);
+         v = (z.atr>0.0) ? moveN/z.atr : 0.0;
+         break;
+        }
       default:
          return(false);
      }
@@ -1091,7 +1103,7 @@ void DrawStatsTable()
 //|  [FILTRE -] [Sifirla]                                             |
 //|  [TALEP] [ARZ]                                                    |
 //|  [Genislik ATR] [min] [max]   (dugme = filtreyi ac/kapa)          |
-//|  ... Uzaklasma ATR, BO, YP, BU, BD, BY                            |
+//|  ... Uzaklasma ATR, BO, YP, BU, BD, BY, Ilk N Mum ATR            |
 //|  [ORJ] [NORJ]   [FFVGT var] [FFVGT yok]   [V] [UV]                |
 //+------------------------------------------------------------------+
 void DrawFilterPanel()
@@ -1103,7 +1115,7 @@ void DrawFilterPanel()
    int    px   = TableX;
    int    py   = TableY + (ShowStatsTable ? TBL_H+6 : 0);
    int    step = 22;
-   int    fullH = 30 + 16 + step*14 + 6;
+   int    fullH = 30 + 16 + step*15 + 6;
    int    H     = fltCollapsed ? 30 : fullH;
 
    string bg = fp + "BG";
@@ -1449,7 +1461,7 @@ void ExportZonesCSV()
    FileWriteString(h,"Tip"+sep+"Bolge_Baslangic(1.mum)"+sep+"Bolge_Olusum(3.mum)"+sep+"Ilk_Temas"+sep+
                      "Ust"+sep+"Alt"+sep+"Genislik_ATR"+sep+"Uzaklasma_ATR"+sep+
                      "TP1"+sep+"TP2"+sep+"TP3"+sep+"TP4"+sep+"TP5"+sep+"TP6"+sep+"TP7"+sep+"TP8"+sep+"BO"+sep+"YP"+sep+"ORJ"+sep+"FFVGT"+sep+
-                     "BU"+sep+"BD"+sep+"BY"+sep+"V"+"\r\n");
+                     "BU"+sep+"BD"+sep+"BY"+sep+"V"+sep+"Ilk"+IntegerToString(gWinN)+"Mum_ATR"+"\r\n");
 
    int total = ArraySize(zones);
    for(int k=0;k<total;k++)
@@ -1480,6 +1492,12 @@ void ExportZonesCSV()
       line += sep + (z.touchIdx>=0 ? IntegerToString(z.touchIdx-z.fvgIdx) : "");
       line += sep + (z.vbrk ? "V" : "UV");
 
+      double moveN = z.isDemand ? MathMax(0.0,z.extN-z.top) : MathMax(0.0,z.bottom-z.extN);
+      double mvN   = (z.atr>0.0) ? moveN/z.atr : 0.0;
+      if(!z.isDemand)
+         mvN = -mvN;
+      line += sep + DoubleToString(mvN,2);
+
       FileWriteString(h,line+"\r\n");
      }
 
@@ -1498,6 +1516,8 @@ int OnInit()
    gTotal      = 0;
    syncValid   = false;
    panelDirty  = true;
+   gWinN = MathMax(1,FirstNCandles);
+   fltName[7] = "Ilk "+IntegerToString(gWinN)+" Mum ATR";
    ResetFilters();
    fltCollapsed = false;
    atrHandle = iATR(_Symbol,_Period,ATRPeriod);
@@ -1601,11 +1621,26 @@ int OnCalculate(const int rates_total,
          double zTop    = high[c1];  // 1. mumun tepesi (her zaman)
          double zBottom = low[c1];   // varsayilan: 1. mumun dibi
 
-         // V1.22: alt sinir HER ZAMAN 2. mumun (FVG mumu) dibi.
-         // Guvenlik: 2. mum dibi 1. mum tepesinin ustundeyse (yukseklik <= 0)
-         // gecersiz kutu olmasin diye 1. mum dibi kullanilir.
-         if(low[c2] < zTop)
+         // 1. mum kendisi ayri bir FVG'nin tamamlayici (3.) mumu MU,
+         // VE 2. mum da kendisi ayri bir FVG'nin tamamlayici (3.) mumu MU?
+         bool c1IsFVG = IsFVG(high,low,c1-2,c1,true);
+         bool c2IsFVG = IsFVG(high,low,c1-1,c2,true);
+
+         // YENI: su anki 1.mum, daha once olusmus bir TALEP bolgesinin
+         // 2.mumu (displacement mumu) muydu?
+         bool c1WasSecondOfDemand = WasSecondCandleOfZone(c1,true);
+
+         if((c1IsFVG && c2IsFVG) || c1WasSecondOfDemand)
+           {
+            // Ozel durum: bolge = 1.mum tepesi ile 2.mum dibi arasi (kosulsuz)
             zBottom = low[c2];
+           }
+         else
+           {
+            // Genel/eski kural: sadece 2.mum daha asagi dip yaptiysa oraya tasi
+            if(low[c2] < zBottom)
+               zBottom = low[c2];
+           }
 
          SDZoneInfo z;
          z.baseIdx     = c1;
@@ -1625,6 +1660,7 @@ int OnCalculate(const int rates_total,
          z.atr         = atrBuf[c3-atrBase];
          z.fvgFar      = low[c3];
          z.ext         = z.top;
+         z.extN        = z.top;
          InitOutcome(z);
          z.bo          = CountBO(high,low,c1,z.top,z.bottom);
          z.yp          = CountYP(high,low,c1-1,YPLookback,z.top,z.bottom);
@@ -1646,11 +1682,24 @@ int OnCalculate(const int rates_total,
          double zBottom = low[c1];   // 1. mumun dibi (her zaman)
          double zTop    = high[c1];  // varsayilan: 1. mumun tepesi
 
-         // V1.22: ust sinir HER ZAMAN 2. mumun (FVG mumu) tepesi.
-         // Guvenlik: 2. mum tepesi 1. mum dibinin altindaysa (yukseklik <= 0)
-         // gecersiz kutu olmasin diye 1. mum tepesi kullanilir.
-         if(high[c2] > zBottom)
+         bool c1IsFVG = IsFVG(high,low,c1-2,c1,false);
+         bool c2IsFVG = IsFVG(high,low,c1-1,c2,false);
+
+         // YENI: su anki 1.mum, daha once olusmus bir ARZ bolgesinin
+         // 2.mumu (displacement mumu) muydu?
+         bool c1WasSecondOfSupply = WasSecondCandleOfZone(c1,false);
+
+         if((c1IsFVG && c2IsFVG) || c1WasSecondOfSupply)
+           {
+            // Ozel durum: bolge = 1.mum dibi ile 2.mum tepesi arasi (kosulsuz)
             zTop = high[c2];
+           }
+         else
+           {
+            // Genel/eski kural: sadece 2.mum daha yuksek tepe yaptiysa oraya tasi
+            if(high[c2] > zTop)
+               zTop = high[c2];
+           }
 
          SDZoneInfo z;
          z.baseIdx     = c1;
@@ -1670,6 +1719,7 @@ int OnCalculate(const int rates_total,
          z.atr         = atrBuf[c3-atrBase];
          z.fvgFar      = high[c3];
          z.ext         = z.bottom;
+         z.extN        = z.bottom;
          InitOutcome(z);
          z.bo          = CountBO(high,low,c1,z.top,z.bottom);
          z.yp          = CountYP(high,low,c1-1,YPLookback,z.top,z.bottom);
@@ -1720,6 +1770,7 @@ int OnCalculate(const int rates_total,
 
       // degisim tespiti icin onceki durum
       double oExt    = zones[k].ext;
+      double oExtN   = zones[k].extN;
       int    oExtIdx = zones[k].extIdx;
       bool   oFf     = zones[k].ffvgt;
       bool   oV      = zones[k].vbrk;
@@ -1740,6 +1791,9 @@ int OnCalculate(const int rates_total,
                zones[k].ext    = high[j];
                zones[k].extIdx = j;   // BU: en uzak noktaya ulasilan bar
               }
+            // V1.22: yalnizca FVG mumu (fvgIdx) dahil ilk N mum icindeki en yuksek seviye
+            if(j<=zones[k].fvgIdx+gWinN-1 && high[j] > zones[k].extN)
+               zones[k].extN = high[j];
             // FFVGT: ilk temastan once FVG'ye girip (low < FVG ust) ustunde kapanis
             if(!zones[k].ffvgt && j<=rates_total-2 && j>zones[k].fvgIdx &&
                low[j] < zones[k].fvgFar && close[j] > zones[k].fvgFar)
@@ -1762,6 +1816,9 @@ int OnCalculate(const int rates_total,
                zones[k].ext    = low[j];
                zones[k].extIdx = j;   // BU: en uzak noktaya ulasilan bar
               }
+            // V1.22: yalnizca FVG mumu (fvgIdx) dahil ilk N mum icindeki en dusuk seviye
+            if(j<=zones[k].fvgIdx+gWinN-1 && low[j] < zones[k].extN)
+               zones[k].extN = low[j];
             // FFVGT: ilk temastan once FVG'ye girip (high > FVG alt) altinda kapanis
             if(!zones[k].ffvgt && j<=rates_total-2 && j>zones[k].fvgIdx &&
                high[j] > zones[k].fvgFar && close[j] < zones[k].fvgFar)
@@ -1806,7 +1863,7 @@ int OnCalculate(const int rates_total,
          zones[k].lastChecked = WaitForCandleClose ? lastBar : lastBar-1;
 
          // Yalnizca kutunun sag ucu ya da yazi icerigi degistiyse yeniden ciz
-         if(zones[k].endIdx!=lastBar || zones[k].ext!=oExt || zones[k].extIdx!=oExtIdx ||
+         if(zones[k].endIdx!=lastBar || zones[k].ext!=oExt || zones[k].extN!=oExtN || zones[k].extIdx!=oExtIdx ||
             zones[k].ffvgt!=oFf || zones[k].vbrk!=oV)
            {
             zones[k].endIdx  = lastBar;
