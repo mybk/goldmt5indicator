@@ -108,16 +108,13 @@
 //|        Panelde min-max olarak girilir. CSV'ye son kolon eklendi.    |
 //|  V1.23: Tabloya Ort R'dan sonra Win% (winrate) kolonu eklendi:      |
 //|        Win% = TP / (TP+SL) x 100 (sonuclanan islem yoksa '-').      |
-//|  V1.26: FVG BOSLUGU = BOLGE: ilk olusan FVG boslugu (talep: 1.mum   |
-//|        high .. 3.mum low, arz: 3.mum high .. 1.mum low) bolgeden   |
-//|        BUYUK veya ESIT ise, bolge dogrudan bu bosluk olarak cizilir.|
-//|        Kucukse bolge eskisi gibi kalir. FvgAsZoneIfLarger ile       |
-//|        acilip kapatilir. Tum hesaplar (temas, TP/SL, BO, YP, ORJ,  |
-//|        genislik...) yeni bolgeye gore yapilir.                      |
-//|  V1.27: HATA DUZELTME (gelecekten sizinti): FVG=bolge oldugunda      |
-//|        bolge kenari 3.mum low/high'a esit oldugu icin bolge 3.mumun |
-//|        KENDISINDE temas almis sayiliyordu (giris 3.mum dibinden).   |
-//|        Artik temas en erken 3.mumdan SONRAKI mumda aranir.         |
+//|  V1.24: Filtre paneline seviye bazli sonuc butonlari: TP1..TP8 ve   |
+//|        SL1..SL8 (ac/kapa). Orn. yalnizca TP1 acikken sadece TP1     |
+//|        olan bolgeler gorunur; SL3 acikken sadece SL3 olanlar.        |
+//|        Ayni seviyede TPn + SLn birlikte acik: ikisinden biri (VEYA). |
+//|        Farkli seviyeler birlikte (orn. TP1 + SL2): ikisi de (VE).    |
+//|        Tablo (TP/SL/Net R) ve grafik bu filtreye gore guncellenir.   |
+//|        Strateji (bolge, temas, TP/SL) mantigina dokunulmadi.         |
 //+------------------------------------------------------------------+
 #property copyright "Claude"
 #property indicator_chart_window
@@ -150,7 +147,6 @@ input int     SwingLookback      = 100;                     // V/UV: swing arama
 input string  CsvSeparator       = ";";                     // CSV ayiraci (Excel TR icin ; , diger icin ,)
 input int     ORJLookback        = 60;                      // ORJ/NORJ: onceki ayni yonlu bolge icin geriye kac mum taransin
 input int     MaxZoneAgeBars     = 60;                      // Bolgenin azami yasi (mum). Sonra saga uzamaz (0 = sinirsiz)
-input bool    FvgAsZoneIfLarger  = true;                    // FVG boslugu bolgeden buyuk/esitse bolge = FVG boslugu
 input int     FirstNCandles      = 3;                       // Ilk N Mum ATR filtresi: FVG mumu (3.mum) dahil kac mum (3 / 4 / 5 ...)
 
 #define NLEV 8          // TP/SL seviye sayisi (1 e N odul: TPn = n x bolge yuksekligi)
@@ -649,6 +645,8 @@ bool   fltDateHasS = false, fltDateHasE = false; // baslangic / bitis tarihi gir
 datetime fltDateS  = 0, fltDateE = 0;          // gun baslangici (00:00) olarak tarihler
 bool   fltCollapsed = false;                   // panel kucultuldu mu
 bool   fltForce     = false;                   // true: var olan nesneler de yeniden ayarlanir
+bool   fltTP[NLEV];                            // V1.24: TPn sonuclu bolgeler (seviye n = 1..NLEV)
+bool   fltSL[NLEV];                            // V1.24: SLn sonuclu bolgeler
 
 //+------------------------------------------------------------------+
 //| Tum filtreleri sifirla (hepsi kapali / hepsi secili)              |
@@ -671,6 +669,8 @@ void ResetFilters()
    fltTimeS  = 0;     fltTimeE    = 0;     fltTimeRef  = 0;
    fltDateOn = false; fltDateHasS = false; fltDateHasE = false;
    fltDateS  = 0;     fltDateE    = 0;
+   for(int n=0;n<NLEV;n++)
+     { fltTP[n] = false; fltSL[n] = false; }
    fltActive = false;
   }
 
@@ -689,6 +689,9 @@ void UpdateFilterActive()
       a = true;
    if(fltDateOn && (fltDateHasS || fltDateHasE))
       a = true;
+   for(int n=0;n<NLEV && !a;n++)
+      if(fltTP[n] || fltSL[n])
+         a = true;
    fltActive = a;
   }
 
@@ -755,6 +758,17 @@ bool ZonePasses(const SDZoneInfo &z)
    if(z.orj      ? !fltOrj     : !fltNorj)    return(false);
    if(z.ffvgt    ? !fltFfvgtY  : !fltFfvgtN)  return(false);
    if(z.vbrk     ? !fltV       : !fltUV)      return(false);
+
+   // V1.24: seviye bazli sonuc filtresi. Seviyede TPn/SLn butonlarindan biri aciksa
+   // o seviyenin sonucu acik olanlardan biri olmali (VEYA); seviyeler arasi VE.
+   for(int ln=0;ln<NLEV;ln++)
+     {
+      if(!fltTP[ln] && !fltSL[ln])
+         continue;
+      int oc = z.out[ln];                       // 0 bekliyor, 1 TP, 2 SL
+      if(!((fltTP[ln] && oc==1) || (fltSL[ln] && oc==2)))
+         return(false);
+     }
 
    for(int i=0;i<FLT_N;i++)
      {
@@ -1132,7 +1146,7 @@ void DrawFilterPanel()
    int    px   = TableX;
    int    py   = TableY + (ShowStatsTable ? TBL_H+6 : 0);
    int    step = 22;
-   int    fullH = 30 + 16 + step*15 + 6;
+   int    fullH = 30 + 16 + step*17 + 6;
    int    H     = fltCollapsed ? 30 : fullH;
 
    string bg = fp + "BG";
@@ -1191,6 +1205,14 @@ void DrawFilterPanel()
    string refTxt = (fltTimeRef==0) ? "Zaman ref: Olusum (3.mum)" :
                    (fltTimeRef==1) ? "Zaman ref: Baslangic (1.mum)" : "Zaman ref: Ilk temas";
    FltButton(fp+"R_TR",px+8,  y,208,refTxt,(fltTimeOn || fltDateOn));
+   y += step;
+
+   // V1.24: seviye bazli sonuc butonlari (TP1..TP8, SL1..SL8)
+   for(int n=0;n<NLEV;n++)
+      FltButton(fp+"R_TP_"+IntegerToString(n),px+8+n*32,y,30,"TP"+IntegerToString(n+1),fltTP[n]);
+   y += step;
+   for(int n2=0;n2<NLEV;n2++)
+      FltButton(fp+"R_SL_"+IntegerToString(n2),px+8+n2*32,y,30,"SL"+IntegerToString(n2+1),fltSL[n2]);
    y += step;
 
    FltButton(fp+"R_O_Y",px+8,  y,100,"ORJ", fltOrj);
@@ -1332,6 +1354,20 @@ void HandleFilterEvent(const int id,const string &sparam)
       else if(key=="R_F_N")   fltFfvgtN = !fltFfvgtN;
       else if(key=="R_V_Y")   fltV      = !fltV;
       else if(key=="R_V_N")   fltUV     = !fltUV;
+      else if(StringFind(key,"R_TP_")==0)
+        {
+         int ti = (int)StringToInteger(StringSubstr(key,5));
+         if(ti<0 || ti>=NLEV)
+            return;
+         fltTP[ti] = !fltTP[ti];
+        }
+      else if(StringFind(key,"R_SL_")==0)
+        {
+         int si = (int)StringToInteger(StringSubstr(key,5));
+         if(si<0 || si>=NLEV)
+            return;
+         fltSL[si] = !fltSL[si];
+        }
       else if(StringFind(key,"R_L_")==0)
         {
          int i = (int)StringToInteger(StringSubstr(key,4));
@@ -1659,14 +1695,6 @@ int OnCalculate(const int rates_total,
                zBottom = low[c2];
            }
 
-         // V1.26: ilk olusan FVG boslugu (1.mum high .. 3.mum low) bolgeden
-         // buyuk veya esitse, bolge dogrudan FVG boslugu olur
-         if(FvgAsZoneIfLarger && (low[c3]-high[c1]) >= (zTop-zBottom)-_Point*0.5)
-           {
-            zBottom = high[c1];
-            zTop    = low[c3];
-           }
-
          SDZoneInfo z;
          z.baseIdx     = c1;
          z.fvgIdx      = c3;
@@ -1724,14 +1752,6 @@ int OnCalculate(const int rates_total,
             // Genel/eski kural: sadece 2.mum daha yuksek tepe yaptiysa oraya tasi
             if(high[c2] > zTop)
                zTop = high[c2];
-           }
-
-         // V1.26: ilk olusan FVG boslugu (3.mum high .. 1.mum low) bolgeden
-         // buyuk veya esitse, bolge dogrudan FVG boslugu olur
-         if(FvgAsZoneIfLarger && (low[c1]-high[c3]) >= (zTop-zBottom)-_Point*0.5)
-           {
-            zTop    = low[c1];
-            zBottom = high[c3];
            }
 
          SDZoneInfo z;
@@ -1812,7 +1832,7 @@ int OnCalculate(const int rates_total,
         {
          if(zones[k].isDemand)
            {
-            if(j>zones[k].fvgIdx && low[j] <= zones[k].top)   // V1.27: 3.mumun kendisinde temas olamaz
+            if(low[j] <= zones[k].top)
               {
                hit = true;
                hitIndex = j;
@@ -1837,7 +1857,7 @@ int OnCalculate(const int rates_total,
            }
          else
            {
-            if(j>zones[k].fvgIdx && high[j] >= zones[k].bottom)   // V1.27: 3.mumun kendisinde temas olamaz
+            if(high[j] >= zones[k].bottom)
               {
                hit = true;
                hitIndex = j;
