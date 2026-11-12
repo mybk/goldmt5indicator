@@ -31,6 +31,11 @@ string  P = "QTP_";
 string N_BG, N_TITLE, N_RLBL, N_RISK, N_BUY, N_SELL, N_CLOSE, N_BE, N_ATRBTN, N_INFO, N_INFO2, N_TLBL, N_TIMER, N_SLBL, N_STIME;
 string L_SL, L_TP;
 
+// Sunucu saati senkronu (tick damgasından, ms hassasiyetinde)
+long    g_off      = 0;       // sunucu_ms - GetTickCount64()
+bool    g_offTick  = false;   // ofset gerçek tick'ten mi alındı
+ulong   g_offAt    = 0;       // ofsetin alındığı yerel zaman
+
 //+------------------------------------------------------------------+
 //| Nesne yardımcıları                                               |
 //+------------------------------------------------------------------+
@@ -265,19 +270,62 @@ void UpdateCalc()
    ChartRedraw();
 }
 
-// Mevcut mumun kapanışına kalan süre (SS:DD:SN)
+// Her tick'te sunucu saatini tick damgasına (ms) göre kalibre et.
+// Tick'e kadar geçen ağ gecikmesi ofseti hep küçültür, bu yüzden en büyük örneği tutuyoruz.
+void SyncServerClock()
+{
+   long msc = SymbolInfoInteger(_Symbol, SYMBOL_TIME_MSC);
+   if(msc <= 0) return;
+   ulong loc  = GetTickCount64();
+   long  cand = msc - (long)loc;
+   if(!g_offTick || cand > g_off || loc - g_offAt > 300000)   // 5 dk'da bir tazele (saat kayması için)
+   {
+      g_off = cand; g_offAt = loc; g_offTick = true;
+   }
+}
+
+// Şu anki sunucu zamanı (ms): son tick damgası + yerel monotonik saat
+long ServerNowMs()
+{
+   if(!g_offTick)   // henüz tick gelmediyse geçici tahmin
+      return (long)TimeTradeServer() * 1000 + (long)(GetTickCount64() % 1000);
+   return (long)GetTickCount64() + g_off;
+}
+
+// Mevcut mumun kapanışına kalan süre (SS:DD:SN) - sunucunun mum damgalarıyla senkron
 void UpdateTimer()
 {
+   static string lastTxt = "";
+   static string lastClk = "";
    datetime open = iTime(_Symbol, PERIOD_CURRENT, 0);
    string txt = "--:--:--";
+   long nowMs = ServerNowMs();
    if(open > 0)
    {
-      long rem = (long)(open + PeriodSeconds(PERIOD_CURRENT) - TimeTradeServer());
-      if(rem < 0) rem = 0;
+      long per = (long)PeriodSeconds(PERIOD_CURRENT);
+      long remMs;
+      if(per > 0 && per < 7 * 86400)
+      {
+         long perMs  = per * 1000;
+         long elapsed = nowMs - (long)open * 1000;
+         if(elapsed < 0) elapsed = 0;
+         remMs = perMs - (elapsed % perMs);
+      }
+      else                                          // MN1 (değişken uzunluk)
+      {
+         MqlDateTime dt; TimeToStruct(open, dt);
+         dt.mon++; if(dt.mon > 12) { dt.mon = 1; dt.year++; }
+         remMs = (long)StructToTime(dt) * 1000 - nowMs;
+         if(remMs < 0) remMs = 0;
+      }
+      long rem = remMs / 1000;                      // aşağı yuvarla: son saniyede 00:00 görünür, sonra tam süre
       txt = StringFormat("%02d:%02d:%02d", (int)(rem / 3600), (int)((rem % 3600) / 60), (int)(rem % 60));
    }
-   ObjectSetString(0, N_TIMER, OBJPROP_TEXT, txt);
-   ObjectSetString(0, N_STIME, OBJPROP_TEXT, TimeToString(TimeTradeServer(), TIME_MINUTES));
+   string clk = TimeToString((datetime)(nowMs / 1000), TIME_MINUTES);
+   bool changed = false;
+   if(txt != lastTxt) { ObjectSetString(0, N_TIMER, OBJPROP_TEXT, txt); lastTxt = txt; changed = true; }
+   if(clk != lastClk) { ObjectSetString(0, N_STIME, OBJPROP_TEXT, clk); lastClk = clk; changed = true; }
+   if(changed) ChartRedraw();
 }
 
 void ShowRisk()
@@ -469,7 +517,7 @@ int OnInit()
    ShowRisk();
    SetSLByATR(false);                       // ATR hazırsa çizgiyi hemen koy (değilse timer koyar)
    ChartSetInteger(0, CHART_EVENT_MOUSE_MOVE, true);
-   EventSetTimer(1);
+   EventSetMillisecondTimer(250);
    UpdateTimer();
    UpdateCalc();
    return INIT_SUCCEEDED;
@@ -486,13 +534,21 @@ void OnDeinit(const int reason)
 
 void OnTimer()
 {
-   UpdateTimer();
-   if(ObjectFind(0, L_SL) < 0) SetSLByATR(false);   // çizgi yoksa (silindiyse / ATR yeni hazır) oluştur
-   UpdateCalc();
+   UpdateTimer();                                   // 250 ms'de bir (sadece metin değişince çizer)
+   static ulong lastHeavy = 0;
+   ulong t = GetTickCount64();
+   if(t - lastHeavy >= 1000)                        // ağır işler saniyede bir
+   {
+      lastHeavy = t;
+      if(ObjectFind(0, L_SL) < 0) SetSLByATR(false);   // çizgi yoksa (silindiyse / ATR yeni hazır) oluştur
+      UpdateCalc();
+   }
 }
 
 void OnTick()
 {
+   SyncServerClock();
+   UpdateTimer();
    UpdateCalc();
 }
 
