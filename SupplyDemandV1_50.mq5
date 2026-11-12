@@ -136,6 +136,10 @@
 //|        Ay/yil kaydirmada gun ay sonuna gore kisitlanir (31.01 ->    |
 //|        28.02). Kutu bossa son bar gununden baslar ve tarih          |
 //|        filtresini otomatik acar.                                    |
+//|  V1.53c: AYNI TUR CAKISMA (ZoneSkipOverlap, vars. true): yeni talep   |
+//|        (arz), kutusu hala uzanan (temas almamis / yas sinirini      |
+//|        asmamis) onceki talep (arz) ile fiyatta cakisiyorsa CIZILMEZ.  |
+//|        Cakisma, yeni bolgenin cizim baslangic mumunda bakilir.      |
 //|  V1.53b: MIN FVG BOSLUGU (MinFvgAtr, vars. 0.5): FVG boslugu (iki      |
 //|        igne arasi) FVG mumunu dogrulayan mumdaki ATR'nin bu katindan   |
 //|        kucukse bolge CIZILMEZ (0 = kapali). Ana grafik + HTF.          |
@@ -354,6 +358,7 @@ input color   EntrySupplyColor   = clrRed;                  // Giris bolgesi ren
 
 input group "=== V1.53 Bolge Siniri Modu ==="
 input ENUM_ZONE_LIMIT_MODE ZoneLimitMode = ZONE_LIMIT_WICK;  // Bolge siniri: IGNE (yeni, varsayilan) / KLASIK (eski kural)
+input bool    ZoneSkipOverlap    = true;                    // Yeni talep, hala gecerli (temas almamis) onceki talep ile (arz icin arz ile) fiyatta cakisiyorsa cizilmez
 input double  MinFvgAtr          = 0.5;                     // Min FVG boslugu (iki igne arasi) ATR cinsinden; bundan kucuk FVG'lerde bolge cizilmez (0 = kapali)
 input int     ZoneExtremeCandles = 3;                    // IGNE modu: alt (arzda ust) sinir icin FVG'li mum dahil kac mum taransin (2 = 1.+FVG'li mum, 3 = bir onceki mum da dahil)
 
@@ -527,6 +532,8 @@ struct SDZoneInfo
    int      sigState;     // V1.47: 0 = giris bekliyor, 1 = girildi (sonuc takibi), 2 = iptal, 3 = silindi
    int      sigId;        // V1.47: benzersiz sinyal numarasi
    int      sigZone;      // V1.50: sinyali ureten HTF bolgesinin motor icindeki index'i
+   int      ovScan;       // V1.53: cakisma kontrolu icin temas taramasinda siradaki bar
+   int      ovTouch;      // V1.53: cakisma kontrolu icin ilk temas / yas siniri bari (-1: henuz yok)
   };
 
 SDZoneInfo zones[];
@@ -538,6 +545,7 @@ int lastScanned = -1;   // yeni bolge taramasinda en son islenen bar (tekrar tar
 //--- V1.20 performans durum degiskenleri
 int    atrBase     = 0;        // atrBuf[0] hangi bar index'ine ait
 int    gWinN       = 3;        // V1.22: Ilk N Mum ATR filtresindeki N (OnInit'te FirstNCandles'tan)
+int    ovList[];               // V1.53: cakisma kontrolu icin hala gecerli olabilecek bolgelerin zones[] index'leri
 int    activeZones[];          // hala islem gerektiren bolgelerin zones[] index'leri
 int    gTotal      = 0;        // son OnCalculate'teki rates_total
 bool   syncValid   = false;    // nesne senkron penceresi gecerli mi
@@ -580,6 +588,66 @@ double FvgPctClamp()
 //| dusuk low'u. Arz ust siniri: ayni mumlarin en yuksek high'i.       |
 //| (c1-1 >= 0 degilse o mum atlanir)                                  |
 //+------------------------------------------------------------------+
+//+------------------------------------------------------------------+
+//| V1.53: cakisma kontrolu. Bolge p, s. barda hala gecerli mi (kutusu |
+//| s'e kadar uzaniyor mu)? Temas = tracking ile ayni kural (talep:    |
+//| low<=ust, arz: high>=alt); MaxZoneAgeBars da bitis sayilir.        |
+//+------------------------------------------------------------------+
+bool ZoneAliveAt(SDZoneInfo &p,const double &hArr[],const double &lArr[],const int s)
+  {
+   if(p.ovTouch>=0)
+      return(p.ovTouch>=s);
+   int expIdx = (MaxZoneAgeBars>0) ? p.fvgIdx+MaxZoneAgeBars : INT_MAX;
+   if(expIdx<s)
+      return(false);
+   int to = s-1;
+   for(int j=p.ovScan;j<=to;j++)
+     {
+      bool hit = p.isDemand ? (lArr[j]<=p.top) : (hArr[j]>=p.bottom);
+      if(hit)
+        {
+         p.ovTouch = j;
+         p.ovScan  = j+1;
+         return(false);
+        }
+     }
+   if(to+1>p.ovScan)
+      p.ovScan = to+1;
+   return(true);
+  }
+
+bool ZoneOverlapsOpen(SDZoneInfo &zs[],const int &list[],const double &hArr[],const double &lArr[],
+                      const bool isDemand,const double top,const double bottom,const int s)
+  {
+   int n = ArraySize(list);
+   for(int q=0;q<n;q++)
+     {
+      int k = list[q];
+      if(zs[k].isDemand!=isDemand)
+         continue;
+      if(!(top>zs[k].bottom && bottom<zs[k].top))
+         continue;                       // fiyatta cakisma yok
+      if(ZoneAliveAt(zs[k],hArr,lArr,s))
+         return(true);
+     }
+   return(false);
+  }
+
+void ZonePruneOpen(SDZoneInfo &zs[],int &list[],const double &hArr[],const double &lArr[],const int h)
+  {
+   if(h<0)
+      return;
+   int n = ArraySize(list), keep = 0;
+   for(int q=0;q<n;q++)
+     {
+      int k = list[q];
+      if(ZoneAliveAt(zs[k],hArr,lArr,h+1))
+         list[keep++] = k;
+     }
+   if(keep!=n)
+      ArrayResize(list,keep);
+  }
+
 bool FvgBigEnough(const double gap,const double atr)
   {
    if(MinFvgAtr<=0.0 || atr<=0.0 || atr==EMPTY_VALUE)
@@ -2596,6 +2664,7 @@ int OnInit()
   {
    ArrayResize(zones,0);
    ArrayResize(activeZones,0);
+   ArrayResize(ovList,0);
    lastScanned = -1;
    gTotal      = 0;
    syncValid   = false;
@@ -2851,6 +2920,7 @@ public:
    double     atrBuf[];
    SDZoneInfo zones[];
    int        active[];
+   int        ovList[];      // V1.53: cakisma kontrolu icin hala gecerli olabilecek bolgeler
    int        sgScan[];     // V1.47: her HTF bolgesi icin ana grafikte taranan son bar (-1 = baslamadi)
    int        sgT0[];       // V1.47: ana grafikte ilk temas bari (-1 = yok)
    int        sgFlag[];     // V1.47: bit0 = fiyat bolgeden uzaklasti, bit1 = bitti (sinyal bulundu / gecersiz)
@@ -2925,6 +2995,7 @@ public:
          sgFrom = 0;
          ArrayResize(zones,0);
          ArrayResize(active,0);
+         ArrayResize(ovList,0);
          ArrayResize(tm,got,4096);
          ArrayResize(op,got,4096);
          ArrayResize(hi,got,4096);
@@ -3022,6 +3093,8 @@ public:
          int c1 = i-2; // 1. mum
          int c2 = i-1; // 2. mum (FVG mumu)
          int c3 = i;   // 3. mum (dogrulayan mum)
+         if(ZoneSkipOverlap)
+            ZonePruneOpen(zones,ovList,hi,lo,i-12);   // V1.53
 
          //--- Yukselis FVG -> Talep bolgesi
          if(ShowDemandZones && lo[c3]>hi[c1] && FvgBigEnough(lo[c3]-hi[c1],atrBuf[c3-atrBase]))
@@ -3057,6 +3130,9 @@ public:
             // (bosluk: 0 = 1. mum tepesi, 100 = 3. mum dibi)
             zTop = NormalizeDouble(zTop + FvgPctClamp()*(lo[c3]-hi[c1]),_Digits);
 
+            bool ovl = ZoneSkipOverlap && ZoneOverlapsOpen(zones,ovList,hi,lo,true,zTop,zBottom,ZoneStartIdx(c1,c2));
+            if(!ovl)
+              {
             SDZoneInfo z;
             z.baseIdx     = c1;
             z.fvgIdx      = c3;
@@ -3070,6 +3146,8 @@ public:
             z.lastChecked = c2;
             z.endIdx      = c3;
             z.timeEnd     = tm[c3];
+            z.ovScan      = c3;         // V1.53
+            z.ovTouch     = -1;
             z.hasObj      = false;
             z.dirty       = true;
             z.tfSec       = tfSec;      // V1.45: HTF bolgesi
@@ -3089,10 +3167,12 @@ public:
             int n = ArraySize(zones);
             ArrayResize(zones,n+1,4096);
             zones[n] = z;
+            { int no = ArraySize(ovList); ArrayResize(ovList,no+1,4096); ovList[no] = n; }   // V1.53
             int na = ArraySize(active);
             ArrayResize(active,na+1,4096);
             active[na] = n;
             changed = true;
+              }
            }
 
          //--- Dusus FVG -> Arz bolgesi
@@ -3127,6 +3207,9 @@ public:
             // (bosluk: 0 = 1. mum dibi, 100 = 3. mum tepesi)
             zBottom = NormalizeDouble(zBottom - FvgPctClamp()*(lo[c1]-hi[c3]),_Digits);
 
+            bool ovl = ZoneSkipOverlap && ZoneOverlapsOpen(zones,ovList,hi,lo,false,zTop,zBottom,ZoneStartIdx(c1,c2));
+            if(!ovl)
+              {
             SDZoneInfo z;
             z.baseIdx     = c1;
             z.fvgIdx      = c3;
@@ -3140,6 +3223,8 @@ public:
             z.lastChecked = c2;
             z.endIdx      = c3;
             z.timeEnd     = tm[c3];
+            z.ovScan      = c3;         // V1.53
+            z.ovTouch     = -1;
             z.hasObj      = false;
             z.dirty       = true;
             z.tfSec       = tfSec;      // V1.45: HTF bolgesi
@@ -3159,10 +3244,12 @@ public:
             int n = ArraySize(zones);
             ArrayResize(zones,n+1,4096);
             zones[n] = z;
+            { int no = ArraySize(ovList); ArrayResize(ovList,no+1,4096); ovList[no] = n; }   // V1.53
             int na = ArraySize(active);
             ArrayResize(active,na+1,4096);
             active[na] = n;
             changed = true;
+              }
            }
         }
 
@@ -5045,6 +5132,7 @@ int OnCalculate(const int rates_total,
       ObjectsDeleteAll(0,prefix);
       ArrayResize(zones,0);
       ArrayResize(activeZones,0);
+      ArrayResize(ovList,0);
       lastScanned = firstBar-1;
       syncValid   = false;
       panelDirty  = true;
@@ -5078,6 +5166,8 @@ int OnCalculate(const int rates_total,
       int c1 = i-2; // 1. mum
       int c2 = i-1; // 2. mum (FVG mumu)
       int c3 = i;   // 3. mum (dogrulayan mum)
+      if(ZoneSkipOverlap)
+         ZonePruneOpen(zones,ovList,high,low,i-12);   // V1.53
 
       //--- Yukselis FVG -> Talep bolgesi
       if(ShowDemandZones && low[c3]>high[c1] && FvgBigEnough(low[c3]-high[c1],atrBuf[c3-atrBase]))
@@ -5113,6 +5203,9 @@ int OnCalculate(const int rates_total,
          // (bosluk: 0 = 1. mum tepesi, 100 = 3. mum dibi)
          zTop = NormalizeDouble(zTop + FvgPctClamp()*(low[c3]-high[c1]),_Digits);
 
+         bool ovl = ZoneSkipOverlap && ZoneOverlapsOpen(zones,ovList,high,low,true,zTop,zBottom,ZoneStartIdx(c1,c2));
+         if(!ovl)
+           {
          SDZoneInfo z;
          z.baseIdx     = c1;
          z.fvgIdx      = c3;
@@ -5126,6 +5219,8 @@ int OnCalculate(const int rates_total,
          z.lastChecked = c2;
          z.endIdx      = c3;
          z.timeEnd     = time[c3];
+         z.ovScan      = c3;         // V1.53
+         z.ovTouch     = -1;
          z.hasObj      = false;
          z.dirty       = true;
          z.tfSec       = 0;          // V1.45: ana grafik bolgesi
@@ -5145,10 +5240,12 @@ int OnCalculate(const int rates_total,
          int n = ArraySize(zones);
          ArrayResize(zones,n+1,4096);
          zones[n] = z;
+         { int no = ArraySize(ovList); ArrayResize(ovList,no+1,4096); ovList[no] = n; }   // V1.53
          int na = ArraySize(activeZones);
          ArrayResize(activeZones,na+1,4096);
          activeZones[na] = n;
          changed = true;
+           }
         }
 
       //--- Dusus FVG -> Arz bolgesi
@@ -5183,6 +5280,9 @@ int OnCalculate(const int rates_total,
          // (bosluk: 0 = 1. mum dibi, 100 = 3. mum tepesi)
          zBottom = NormalizeDouble(zBottom - FvgPctClamp()*(low[c1]-high[c3]),_Digits);
 
+         bool ovl = ZoneSkipOverlap && ZoneOverlapsOpen(zones,ovList,high,low,false,zTop,zBottom,ZoneStartIdx(c1,c2));
+         if(!ovl)
+           {
          SDZoneInfo z;
          z.baseIdx     = c1;
          z.fvgIdx      = c3;
@@ -5196,6 +5296,8 @@ int OnCalculate(const int rates_total,
          z.lastChecked = c2;
          z.endIdx      = c3;
          z.timeEnd     = time[c3];
+         z.ovScan      = c3;         // V1.53
+         z.ovTouch     = -1;
          z.hasObj      = false;
          z.dirty       = true;
          z.tfSec       = 0;          // V1.45: ana grafik bolgesi
@@ -5215,10 +5317,12 @@ int OnCalculate(const int rates_total,
          int n = ArraySize(zones);
          ArrayResize(zones,n+1,4096);
          zones[n] = z;
+         { int no = ArraySize(ovList); ArrayResize(ovList,no+1,4096); ovList[no] = n; }   // V1.53
          int na = ArraySize(activeZones);
          ArrayResize(activeZones,na+1,4096);
          activeZones[na] = n;
          changed = true;
+           }
         }
      }
 
