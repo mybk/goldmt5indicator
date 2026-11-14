@@ -368,7 +368,7 @@ input color   EntrySupplyColor   = clrRed;                  // Giris bolgesi ren
 
 input group "=== V1.53 Bolge Siniri Modu ==="
 input ENUM_ZONE_LIMIT_MODE ZoneLimitMode = ZONE_LIMIT_WICK;  // Bolge siniri: IGNE (yeni, varsayilan) / KLASIK (eski kural)
-input bool    ZoneSkipOverlap    = true;                    // Yeni talep, hala gecerli (temas almamis) onceki talep ile (arz icin arz ile) fiyatta cakisiyorsa cizilmez
+input bool    ZoneSkipOverlap    = false;                    // Yeni talep, hala gecerli (temas almamis) onceki talep ile (arz icin arz ile) fiyatta cakisiyorsa cizilmez
 input double  MinFvgAtr          = 0.2;                     // Min FVG boslugu (iki igne arasi) ATR cinsinden; bundan kucuk FVG'lerde bolge cizilmez (0 = kapali)
 input int     ZoneExtremeCandles = 3;                    // IGNE modu: alt (arzda ust) sinir icin FVG'li mum dahil kac mum taransin (2 = 1.+FVG'li mum, 3 = bir onceki mum da dahil)
 
